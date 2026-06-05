@@ -26,8 +26,6 @@ const COMMENT_SELECTORS = [
   '[class*="reply"]', '[class*="Reply"]',
   '[class*="interact"]', '[class*="Interact"]',
 ];
-const DETAIL_POLL_MS = 300;
-const DETAIL_POLL_TIMEOUT = 5000;
 
 export async function loadDetailInHiddenFrame(item: Card): Promise<Detail> {
   const noteId = extractNoteId(item);
@@ -35,13 +33,16 @@ export async function loadDetailInHiddenFrame(item: Card): Promise<Detail> {
   const cached = getCachedRenderedDetail(item);
   if (cached) return cached;
 
-  triggerNativeClick(item);
+  // window.open 真实浏览器窗口 — XHS 相信 isTrusted
+  openPopupDetail(item);
 
-  // 等 bridge 捕获 API 数据（最快），或详情 DOM 出现
-  const polled = await pollForDetail(noteId, item);
-  if (polled) return polled;
+  // 等 popup 加载 + bridge 捕获 + postMessage 回来
+  await new Promise((r) => setTimeout(r, 5000));
 
-  console.log('[XHS Workbench Shell] detail poll timeout for ' + noteId);
+  const after = getCachedRenderedDetail(item);
+  if (after) return after;
+
+  console.log('[XHS Workbench Shell] popup timeout for ' + noteId);
   return cardOnlyDetail(item);
 }
 
@@ -88,109 +89,34 @@ function cardOnlyDetail(item: Card): Detail {
 }
 
 /**
- * 模拟真实用户点击：pointerdown → pointerup → mousedown → mouseup → click。
- * 先临时解除 pointer-events:none，点击后恢复。
+ * window.open 打开真实浏览器小窗口 — 所有事件 isTrusted:true。
+ * 去掉 noopener 让 popup 能 window.opener.postMessage 回传数据。
  */
-function triggerNativeClick(item: Card): void {
-  const noteId = extractNoteId(item);
-  const container = findNoteContainer(noteId);
-  if (!container) {
-    console.warn('[XHS Workbench Shell] no .note-item for ' + noteId);
-    return;
+function openPopupDetail(item: Card): void {
+  const href = item.href || '';
+  const fullUrl = href.startsWith('http') ? href : location.origin + href;
+
+  // 去掉 xsec_token
+  let cleanUrl = fullUrl;
+  try {
+    const u = new URL(fullUrl);
+    u.searchParams.delete('xsec_token');
+    u.searchParams.delete('xsec_source');
+    cleanUrl = u.href;
+  } catch { /* ignore */ }
+
+  const w = 800, h = 700;
+  const left = Math.max(0, screen.width - w - 30);
+  const top = Math.max(0, screen.height - h - 30);
+
+  console.log('[XHS Workbench Shell] opening popup: ' + cleanUrl.slice(0, 80));
+  const popup = window.open(cleanUrl, '_blank',
+    'width=' + w + ',height=' + h + ',left=' + left + ',top=' + top);
+
+  // 6 秒后自动关闭
+  if (popup) {
+    setTimeout(() => { try { popup.close(); } catch {} }, 6000);
   }
-
-  const r = document.documentElement;
-  const prev = r.getAttribute('data-xhs-wb4-native-visible');
-  r.setAttribute('data-xhs-wb4-native-visible', 'on');
-
-  container.scrollIntoView({ block: 'center', inline: 'nearest' });
-
-  requestAnimationFrame(() => {
-    try {
-      const rect = container.getBoundingClientRect();
-      const cx = rect.left + rect.width / 2;
-      const cy = rect.top + rect.height / 2;
-
-      const events = [
-        new PointerEvent('pointerdown', { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, pointerType: 'mouse', isPrimary: true }),
-        new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy }),
-        new PointerEvent('pointerup', { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, pointerType: 'mouse', isPrimary: true }),
-        new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy }),
-        new MouseEvent('click', { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, button: 0, buttons: 1 }),
-      ];
-
-      for (const event of events) {
-        container.dispatchEvent(event);
-      }
-
-      console.log('[XHS Workbench Shell] dispatched pointer sequence on .note-item at', cx, cy);
-    } finally {
-      setTimeout(() => {
-        if (prev !== null) {
-          r.setAttribute('data-xhs-wb4-native-visible', prev);
-        } else {
-          r.removeAttribute('data-xhs-wb4-native-visible');
-        }
-      }, 500);
-    }
-  });
-}
-
-function findNoteContainer(noteId: string): Element | null {
-  const items = document.querySelectorAll<HTMLElement>('.note-item');
-  for (const el of Array.from(items)) {
-    if (el.closest('#' + IDS.app)) continue;
-    if (el.querySelector('a[href*="' + noteId + '"]')) return el;
-  }
-  const links = document.querySelectorAll<HTMLAnchorElement>('a[href*="' + noteId + '"]');
-  for (const a of Array.from(links)) {
-    if (a.closest('#' + IDS.app)) continue;
-    return a.closest('.note-item') || a.closest('[class*="note"]') || a.parentElement;
-  }
-  return null;
-}
-
-/**
- * 轮询等待详情数据：bridge 缓存 或 DOM 出现详情内容。
- */
-function pollForDetail(noteId: string, item: Card): Promise<Detail | null> {
-  const start = Date.now();
-
-  return new Promise((resolve) => {
-    const timer = window.setInterval(() => {
-      const cached = getCachedRenderedDetail(item);
-      if (cached) {
-        window.clearInterval(timer);
-        resolve(cached);
-        return;
-      }
-
-      const fromDom = tryExtractDetailFromDom(noteId, item);
-      if (fromDom) {
-        window.clearInterval(timer);
-        resolve(fromDom);
-        return;
-      }
-
-      if (Date.now() - start >= DETAIL_POLL_TIMEOUT) {
-        window.clearInterval(timer);
-        resolve(null);
-      }
-    }, DETAIL_POLL_MS);
-  });
-}
-
-function tryExtractDetailFromDom(noteId: string, item: Card): Detail | null {
-  const detail = loadCurrentPageDetailFromDom();
-  if (!detail) return null;
-
-  const fromNoteId = extractNoteIdFromLocation();
-  if (fromNoteId === noteId || detail.title || detail.comments.length > 0) {
-    console.log('[XHS Workbench Shell] extracted detail from DOM for ' + noteId);
-    return detail;
-  }
-
-  return null;
 }
 
 export function loadCurrentPageDetailFromDom(): Detail | null {
