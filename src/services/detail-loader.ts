@@ -94,8 +94,18 @@ function vueRouterNavigate(item: Card): boolean {
 }
 
 function resolveVueApp(): Record<string, unknown> | null {
-  const el = document.querySelector('.app') as HTMLElement | null;
+  // XHS 的 Vue app 挂载在 #app 上（不是 .app）
+  const el = document.querySelector('#app') as HTMLElement | null;
   if (el?.['__vue_app__' as keyof HTMLElement]) return el['__vue_app__' as keyof HTMLElement] as unknown as Record<string, unknown>;
+
+  // fallback: 遍历 body 找
+  const body = document.body;
+  if (body?.['__vue_app__' as keyof HTMLElement]) return body['__vue_app__' as keyof HTMLElement] as unknown as Record<string, unknown>;
+
+  for (const el of Array.from(document.querySelectorAll('*'))) {
+    if (el['__vue_app__' as keyof HTMLElement]) return el['__vue_app__' as keyof HTMLElement] as unknown as Record<string, unknown>;
+  }
+
   return null;
 }
 
