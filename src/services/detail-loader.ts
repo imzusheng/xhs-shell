@@ -1,8 +1,7 @@
 import { IDS } from '../constants';
-import { getCleanText, splitLines, safeRect } from '../utils/dom';
+import { getCleanText, splitLines } from '../utils/dom';
 import { cacheComments, cacheDetail, getCachedComments, getCachedDetail } from './note-store';
 import type { Card } from './card-scanner';
-import { parseApiComments, parseApiDetail } from './normalizer';
 import type { NoteComment, NoteDetail } from './normalizer';
 
 export interface Comment {
@@ -20,12 +19,13 @@ export interface Detail {
   source: string;
 }
 
-const RESTRICTED_KEYWORDS = ['暂时无法浏览', '请打开小红书App', '扫码查看'];
 const COMMENT_SELECTORS = [
   '[class*="comment"]', '[class*="Comment"]',
   '[class*="reply"]', '[class*="Reply"]',
   '[class*="interact"]', '[class*="Interact"]',
 ];
+const ROUTER_WAIT_MS = 5000;
+const ROUTER_POLL_MS = 300;
 
 export async function loadDetailInHiddenFrame(item: Card): Promise<Detail> {
   const noteId = extractNoteId(item);
@@ -33,16 +33,13 @@ export async function loadDetailInHiddenFrame(item: Card): Promise<Detail> {
   const cached = getCachedRenderedDetail(item);
   if (cached) return cached;
 
-  // window.open 真实浏览器窗口 — XHS 相信 isTrusted
-  openPopupDetail(item);
+  // 直接用 Vue Router 内部跳转 — 不走事件，不走窗口，纯 SPA
+  if (vueRouterNavigate(item)) {
+    const routeUsed = await waitForRouteNavigation(item);
+    if (routeUsed) return routeUsed;
+  }
 
-  // 等 popup 加载 + bridge 捕获 + postMessage 回来
-  await new Promise((r) => setTimeout(r, 5000));
-
-  const after = getCachedRenderedDetail(item);
-  if (after) return after;
-
-  console.log('[XHS Workbench Shell] popup timeout for ' + noteId);
+  console.log('[XHS Workbench Shell] showing card data for ' + noteId);
   return cardOnlyDetail(item);
 }
 
@@ -65,56 +62,70 @@ export function getCachedRenderedDetail(item: Card): Detail | null {
     desc: detail?.desc || item.rawText || item.desc,
     author: detail?.author || item.author,
     href: item.href,
-    images: pickDetailImages(detail, item),
+    images: detail?.images?.length ? detail.images : (item.image ? [item.image] : []),
     comments: comments.map((c: NoteComment) => ({ name: c.name, text: c.text })),
     source: detail ? 'api-detail' : 'api-comments',
   };
 }
 
-function pickDetailImages(detail: NoteDetail | null, item: Card): string[] {
-  if (detail?.images?.length) return detail.images;
-  return item.image ? [item.image] : [];
-}
-
 function cardOnlyDetail(item: Card): Detail {
   return {
-    title: item.title,
-    desc: item.rawText || item.desc,
-    author: item.author,
-    href: item.href,
-    images: item.image ? [item.image] : [],
-    comments: [],
+    title: item.title, desc: item.rawText || item.desc, author: item.author,
+    href: item.href, images: item.image ? [item.image] : [], comments: [],
     source: 'card-only',
   };
 }
 
-/**
- * window.open 打开真实浏览器小窗口 — 所有事件 isTrusted:true。
- * 去掉 noopener 让 popup 能 window.opener.postMessage 回传数据。
- */
-function openPopupDetail(item: Card): void {
-  const href = item.href || '';
-  const fullUrl = href.startsWith('http') ? href : location.origin + href;
-
-  let cleanUrl = fullUrl;
+/** 直接用 Vue Router 跳转 — 真正 SPA 导航 */
+function vueRouterNavigate(item: Card): boolean {
   try {
-    const u = new URL(fullUrl);
-    u.searchParams.delete('xsec_token');
-    u.searchParams.delete('xsec_source');
-    cleanUrl = u.href;
-  } catch { /* ignore */ }
+    const app = resolveVueApp();
+    const router = app?.config?.globalProperties?.$router;
+    if (!router) return false;
 
-  console.log('[XHS Workbench Shell] opening background window: ' + cleanUrl.slice(0, 80));
-
-  // 最小化窗口，放在左上角，立即藏到主窗口后面
-  const popup = window.open(cleanUrl, '_blank', 'width=200,height=200,top=0,left=0');
-  if (popup) {
-    popup.blur();
-    window.focus();
-    // 数据回到主窗口后自动关闭（最长 6s）
-    setTimeout(() => { try { popup.close(); } catch {} }, 6000);
+    const href = item.href.replace(/^https?:\/\/[^/]+/, '');
+    console.log('[XHS Workbench Shell] router.push(' + href + ')');
+    router.push(href);
+    return true;
+  } catch (err) {
+    console.warn('[XHS Workbench Shell] vueRouterNavigate failed', err);
+    return false;
   }
 }
+
+function resolveVueApp(): Record<string, unknown> | null {
+  const el = document.querySelector('.app') as HTMLElement | null;
+  if (el?.['__vue_app__' as keyof HTMLElement]) return el['__vue_app__' as keyof HTMLElement] as unknown as Record<string, unknown>;
+  return null;
+}
+
+/** 等 router 跳转后页面渲染完成，抽 DOM 数据 */
+function waitForRouteNavigation(item: Card): Promise<Detail | null> {
+  const noteId = extractNoteId(item);
+  const startUrl = location.href;
+  const start = Date.now();
+
+  return new Promise((resolve) => {
+    const timer = window.setInterval(() => {
+      // bridge 先捕获到数据
+      const cached = getCachedRenderedDetail(item);
+      if (cached) { clearInterval(timer); resolve(cached); return; }
+
+      // URL 变了（router 已触发），等 DOM 渲染
+      if (location.href !== startUrl) {
+        const dom = loadCurrentPageDetailFromDom();
+        if (dom) { clearInterval(timer); resolve(dom); return; }
+      }
+
+      if (Date.now() - start >= ROUTER_WAIT_MS) {
+        clearInterval(timer);
+        resolve(null);
+      }
+    }, ROUTER_POLL_MS);
+  });
+}
+
+/* ─── DOM extraction (unchanged from original) ─── */
 
 export function loadCurrentPageDetailFromDom(): Detail | null {
   const noteId = extractNoteIdFromLocation();
@@ -141,11 +152,7 @@ export function loadCurrentPageDetailFromDom(): Detail | null {
   }
 
   return {
-    title: title || noteId,
-    desc,
-    author,
-    href: location.href,
-    images,
+    title: title || noteId, desc, author, href: location.href, images,
     comments: rawComments,
     source: rawComments.length ? 'native-dom-comments' : 'native-dom-detail',
   };
@@ -201,32 +208,19 @@ function extractCommentsFromDoc(root: Element): Comment[] {
       if (/^(评论|回复|展开|加载更多)/.test(text) && text.length < 14) continue;
       seen.add(text);
       const lines = splitLines(text);
-      const name = pickCommentName(node, lines);
-      const body = pickCommentBody(text, lines, name);
+      const name = lines[0]?.length <= 30 ? lines[0] : 'comment_user';
+      const body = lines.length > 1 ? lines.slice(1).join('\n') : text;
       out.push({ name: name.slice(0, 32), text: body.slice(0, 420) });
     }
   }
-  console.log('[XHS Workbench Shell] extracted ' + out.length + ' comments from DOM');
   return out.slice(0, 30);
 }
 
 function isCommentContainerNoise(node: Element, text: string): boolean {
   if (/共\s*\d+\s*条评论|说点什么|发送|取消/.test(text)) return true;
   if ((text.match(/回复/g) || []).length > 4) return true;
-  const nested = Array.from(node.querySelectorAll(COMMENT_SELECTORS.join(',')));
-  return nested.filter((child) => child !== node && getCleanText(child).length > 6).length > 3;
-}
-
-function pickCommentName(node: Element, lines: string[]): string {
-  const profile = node.querySelector('a[href*="/user/profile"]');
-  const profileName = getCleanText(profile);
-  if (profileName.length >= 2 && profileName.length <= 32) return profileName;
-  return (lines[0] || '').length <= 30 ? lines[0] : 'comment_user';
-}
-
-function pickCommentBody(text: string, lines: string[], name: string): string {
-  if (lines.length > 1) return lines.slice(1).join('\n');
-  return name && text.startsWith(name) ? text.slice(name.length).trim() : text;
+  return Array.from(node.querySelectorAll(COMMENT_SELECTORS.join(',')))
+    .filter((child) => child !== node && getCleanText(child).length > 6).length > 3;
 }
 
 function extractImagesFromDoc(root: Element): string[] {

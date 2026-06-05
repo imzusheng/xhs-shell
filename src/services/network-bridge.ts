@@ -23,19 +23,7 @@ interface BridgeMessage {
 
 export function initNetworkBridge(): void {
   window.addEventListener('message', handleBridgeMessage, false);
-  console.log('[XHS Workbench Shell V5] NetworkBridge listening' + (window.opener ? ' (popup)' : ''));
-}
-
-function relayToOpener(key: string, noteId: string, data: unknown): void {
-  if (!window.opener) return;
-  try {
-    window.opener.postMessage({
-      __xhs_wb5_popup: true,
-      noteId,
-      data: { [key]: data },
-    }, '*');
-    console.log('[XHS Workbench Shell] relayed ' + key + ' to opener: ' + noteId);
-  } catch { /* ignore */ }
+  console.log('[XHS Workbench Shell V5] NetworkBridge listening');
 }
 
 function handleBridgeMessage(event: MessageEvent): void {
@@ -101,13 +89,11 @@ function handleBridgeMessage(event: MessageEvent): void {
     const noteId = extractNoteId(url, requestBody);
     if (noteId) {
       cacheComments(noteId, comments);
-      relayToOpener('comments', noteId, comments);
     }
   }
 
   if (detail) {
     cacheDetail(detail.noteId, detail);
-    relayToOpener('detail', detail.noteId, detail);
   }
 
   if (notes.length > 0 || comments.length > 0 || detail) {
