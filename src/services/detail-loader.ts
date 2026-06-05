@@ -26,8 +26,6 @@ const COMMENT_SELECTORS = [
   '[class*="reply"]', '[class*="Reply"]',
   '[class*="interact"]', '[class*="Interact"]',
 ];
-const CLICK_WAIT_MS = 3000;
-const CLICK_POLL_MS = 250;
 
 export async function loadDetailInHiddenFrame(item: Card): Promise<Detail> {
   const noteId = extractNoteId(item);
@@ -35,12 +33,16 @@ export async function loadDetailInHiddenFrame(item: Card): Promise<Detail> {
   const cached = getCachedRenderedDetail(item);
   if (cached) return cached;
 
-  if (triggerNativeDetail(item)) {
-    const polled = await waitForCachedDetail(item);
-    if (polled) return polled;
-  }
+  // 打开 popup 窗口 — XHS 认为是真实浏览器窗口，完整渲染页面
+  openPopupDetail(item);
 
-  console.log('[XHS Workbench Shell] showing card data for ' + noteId);
+  // 等 4s 让 popup 加载 + bridge 捕获 + postMessage 回来
+  await new Promise((r) => setTimeout(r, 4000));
+
+  const after = getCachedRenderedDetail(item);
+  if (after) return after;
+
+  console.log('[XHS Workbench Shell] popup timeout, showing card data for ' + noteId);
   return {
     title: item.title,
     desc: item.rawText || item.desc,
@@ -83,98 +85,37 @@ function pickDetailImages(detail: NoteDetail | null, item: Card): string[] {
 }
 
 /**
- * 用 querySelector 找 Vue hydration 后的真实 DOM 元素，
- * 临时解除 pointer-events:none，派发 click 让 SPA 自己处理。
- * 不调用 .click()（会触发浏览器默认导航），不用数据保存的引用（SSR 时代已失效）。
+ * 用 window.open 打开真实浏览器小窗口加载详情页。
+ * XHS 认为是真实用户操作 → 完整渲染 + 发 API。
+ * popup 里的 userscript bridge 捕获数据后 postMessage 回来。
  */
-function triggerNativeDetail(item: Card): boolean {
-  const noteId = extractNoteId(item);
-  console.log('[XHS Workbench Shell] triggering native click for ' + noteId);
+function openPopupDetail(item: Card): void {
+  const href = item.href || '';
+  const fullUrl = href.startsWith('http') ? href : location.origin + href;
 
-  // 找 .note-item Vue 组件根元素（不是 <a>！点 <a> 会触发浏览器导航）
-  const container = findNoteContainer(noteId);
-  if (!container) {
-    console.warn('[XHS Workbench Shell] no note container found for ' + noteId);
-    return false;
-  }
-
-  // 临时解除壳层的 pointer-events 阻断
-  const r = document.documentElement;
-  const prevNative = r.getAttribute('data-xhs-wb4-native-visible');
-  r.setAttribute('data-xhs-wb4-native-visible', 'on');
-
+  // 去掉 xsec_token，实测不需要
+  let cleanUrl = fullUrl;
   try {
-    container.scrollIntoView({ block: 'center', inline: 'nearest' });
+    const u = new URL(fullUrl);
+    u.searchParams.delete('xsec_token');
+    u.searchParams.delete('xsec_source');
+    cleanUrl = u.href;
+  } catch { /* use original */ }
 
-    requestAnimationFrame(() => {
-      try {
-        const rect = container.getBoundingClientRect();
-        const cx = rect.left + rect.width / 2;
-        const cy = rect.top + rect.height / 2;
+  const w = 800, h = 700;
+  const left = Math.max(0, screen.width - w - 30);
+  const top = Math.max(0, screen.height - h - 30);
 
-        container.dispatchEvent(new MouseEvent('click', {
-          bubbles: true, cancelable: true, view: window,
-          clientX: cx, clientY: cy, button: 0, buttons: 1,
-        }));
-        console.log('[XHS Workbench Shell] dispatched click on note container at', cx, cy);
-      } finally {
-        setTimeout(() => {
-          if (prevNative !== null) {
-            r.setAttribute('data-xhs-wb4-native-visible', prevNative);
-          } else {
-            r.removeAttribute('data-xhs-wb4-native-visible');
-          }
-        }, 500);
-      }
-    });
+  console.log('[XHS Workbench Shell] opening popup: ' + cleanUrl.slice(0, 80));
+  const popup = window.open(cleanUrl, '_blank',
+    'width=' + w + ',height=' + h + ',left=' + left + ',top=' + top + ',noopener');
 
-    return true;
-  } catch (err) {
-    r.setAttribute('data-xhs-wb4-native-visible', prevNative || 'off');
-    console.warn('[XHS Workbench Shell] native click dispatch failed', err);
-    return false;
+  // 4 秒后自动关闭 popup
+  if (popup) {
+    setTimeout(() => {
+      try { popup.close(); } catch { /* ignore */ }
+    }, 4000);
   }
-}
-
-function findNoteContainer(noteId: string): Element | null {
-  // 先找 .note-item（Vue 组件根）
-  const items = document.querySelectorAll<HTMLElement>('.note-item');
-  for (const el of Array.from(items)) {
-    if (el.closest('#' + IDS.app)) continue;
-    const link = el.querySelector('a[href*="' + noteId + '"]');
-    if (link) return el;
-  }
-
-  // fallback: 用更宽泛的选择器
-  const links = document.querySelectorAll<HTMLAnchorElement>('a[href*="' + noteId + '"]');
-  for (const a of Array.from(links)) {
-    if (a.closest('#' + IDS.app)) continue;
-    // 返回 link 的父容器，不是 link 本身
-    const parent = a.closest('.note-item') || a.closest('[class*="note"]') || a.parentElement;
-    if (parent) return parent;
-  }
-
-  return null;
-}
-
-function waitForCachedDetail(item: Card): Promise<Detail | null> {
-  const start = Date.now();
-
-  return new Promise((resolve) => {
-    const timer = window.setInterval(() => {
-      const cached = getCachedRenderedDetail(item);
-      if (cached) {
-        window.clearInterval(timer);
-        resolve(cached);
-        return;
-      }
-
-      if (Date.now() - start >= CLICK_WAIT_MS) {
-        window.clearInterval(timer);
-        resolve(null);
-      }
-    }, CLICK_POLL_MS);
-  });
 }
 
 export function loadCurrentPageDetailFromDom(): Detail | null {

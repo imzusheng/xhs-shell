@@ -12,7 +12,7 @@ import { renderDetail, renderDetailLoading, renderRightEmpty } from './panels/de
 import { loadDetailInHiddenFrame, getCachedRenderedDetail, loadCurrentPageDetailFromDom } from './services/detail-loader';
 import { getPageHookCode } from './inject/page-hook';
 import { initNetworkBridge, parseInitialState } from './services/network-bridge';
-import { setOnUpdated } from './services/note-store';
+import { setOnUpdated, cacheComments, cacheDetail } from './services/note-store';
 import type { Card } from './services/card-scanner';
 import type { Detail } from './services/detail-loader';
 
@@ -48,16 +48,32 @@ import type { Detail } from './services/detail-loader';
     });
   }
 
-  function renderCurrentPageDetail(): boolean {
-    const detail = loadCurrentPageDetailFromDom();
-    if (!detail) return false;
-    renderDetail(detail);
-    return true;
+  // ─── Listen for popup relayed data ───
+  function listenPopupRelay(): void {
+    window.addEventListener('message', (e) => {
+      if (!e.data?.__xhs_wb5_popup) return;
+      const { noteId, data } = e.data as { noteId: string; data: Record<string, unknown> };
+      if (!noteId) return;
+
+      if (data.detail) cacheDetail(noteId, data.detail as import('./services/normalizer').NoteDetail);
+      if (data.comments) cacheComments(noteId, data.comments as import('./services/normalizer').NoteComment[]);
+
+      console.log('[XHS Workbench Shell] received popup data for ' + noteId);
+
+      // trigger re-render
+      renderList(openShellDetail, onTagClick);
+      const sel = findSelected();
+      if (sel && getState().rightMode === 'detail') {
+        const cached = getCachedRenderedDetail(sel);
+        if (cached) renderDetail(cached);
+      }
+    });
   }
 
   function bootEarly(): void {
     initNetworkBridge();
     injectPageHook();
+    listenPopupRelay();
 
     setOnUpdated(() => {
       renderList(openShellDetail, onTagClick);
@@ -76,6 +92,13 @@ import type { Detail } from './services/detail-loader';
     script.textContent = getPageHookCode();
     (document.head || document.documentElement).appendChild(script);
     script.remove();
+  }
+
+  function renderCurrentPageDetail(): boolean {
+    const detail = loadCurrentPageDetailFromDom();
+    if (!detail) return false;
+    renderDetail(detail);
+    return true;
   }
 
   function initUI(): void {
