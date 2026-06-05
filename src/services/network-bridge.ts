@@ -24,23 +24,6 @@ interface BridgeMessage {
 export function initNetworkBridge(): void {
   window.addEventListener('message', handleBridgeMessage, false);
   console.log('[XHS Workbench Shell V5] NetworkBridge listening');
-
-  // 如果当前窗口是 popup，通知 opener
-  if (window.opener) {
-    console.log('[XHS Workbench Shell] popup mode — will relay data to opener');
-  }
-}
-
-function relayToOpener(noteId: string, data: Record<string, unknown>): void {
-  if (!window.opener) return;
-  try {
-    window.opener.postMessage({
-      __xhs_wb5_popup: true,
-      noteId,
-      data,
-    }, '*');
-    console.log('[XHS Workbench Shell] relayed to opener: ' + noteId);
-  } catch { /* ignore */ }
 }
 
 function handleBridgeMessage(event: MessageEvent): void {
@@ -106,13 +89,11 @@ function handleBridgeMessage(event: MessageEvent): void {
     const noteId = extractNoteId(url, requestBody);
     if (noteId) {
       cacheComments(noteId, comments);
-      relayToOpener(noteId, { comments });
     }
   }
 
   if (detail) {
     cacheDetail(detail.noteId, detail);
-    relayToOpener(detail.noteId, { detail });
   }
 
   if (notes.length > 0 || comments.length > 0 || detail) {
