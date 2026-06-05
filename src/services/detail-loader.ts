@@ -24,22 +24,15 @@ const COMMENT_SELECTORS = [
   '[class*="reply"]', '[class*="Reply"]',
   '[class*="interact"]', '[class*="Interact"]',
 ];
-const ROUTER_WAIT_MS = 5000;
-const ROUTER_POLL_MS = 300;
 
 export async function loadDetailInHiddenFrame(item: Card): Promise<Detail> {
-  const noteId = extractNoteId(item);
-
+  // 查缓存：bridge 是否已从用户日常交互中捕获了此笔记的数据
   const cached = getCachedRenderedDetail(item);
   if (cached) return cached;
 
-  // 直接用 Vue Router 内部跳转 — 不走事件，不走窗口，纯 SPA
-  if (vueRouterNavigate(item)) {
-    const routeUsed = await waitForRouteNavigation(item);
-    if (routeUsed) return routeUsed;
-  }
-
-  console.log('[XHS Workbench Shell] showing card data for ' + noteId);
+  // 无缓存 → 立即显示卡片已有数据，不做任何程序化触发
+  const noteId = extractNoteId(item);
+  console.log('[XHS Workbench Shell] no cached detail for ' + noteId + ', showing card data');
   return cardOnlyDetail(item);
 }
 
@@ -75,67 +68,6 @@ function cardOnlyDetail(item: Card): Detail {
     source: 'card-only',
   };
 }
-
-/** 直接用 Vue Router 跳转 — 真正 SPA 导航 */
-function vueRouterNavigate(item: Card): boolean {
-  try {
-    const app = resolveVueApp();
-    const router = app?.config?.globalProperties?.$router;
-    if (!router) return false;
-
-    const href = item.href.replace(/^https?:\/\/[^/]+/, '');
-    console.log('[XHS Workbench Shell] router.push(' + href + ')');
-    router.push(href);
-    return true;
-  } catch (err) {
-    console.warn('[XHS Workbench Shell] vueRouterNavigate failed', err);
-    return false;
-  }
-}
-
-function resolveVueApp(): Record<string, unknown> | null {
-  // XHS 的 Vue app 挂载在 #app 上（不是 .app）
-  const el = document.querySelector('#app') as HTMLElement | null;
-  if (el?.['__vue_app__' as keyof HTMLElement]) return el['__vue_app__' as keyof HTMLElement] as unknown as Record<string, unknown>;
-
-  // fallback: 遍历 body 找
-  const body = document.body;
-  if (body?.['__vue_app__' as keyof HTMLElement]) return body['__vue_app__' as keyof HTMLElement] as unknown as Record<string, unknown>;
-
-  for (const el of Array.from(document.querySelectorAll('*'))) {
-    if (el['__vue_app__' as keyof HTMLElement]) return el['__vue_app__' as keyof HTMLElement] as unknown as Record<string, unknown>;
-  }
-
-  return null;
-}
-
-/** 等 router 跳转后页面渲染完成，抽 DOM 数据 */
-function waitForRouteNavigation(item: Card): Promise<Detail | null> {
-  const noteId = extractNoteId(item);
-  const startUrl = location.href;
-  const start = Date.now();
-
-  return new Promise((resolve) => {
-    const timer = window.setInterval(() => {
-      // bridge 先捕获到数据
-      const cached = getCachedRenderedDetail(item);
-      if (cached) { clearInterval(timer); resolve(cached); return; }
-
-      // URL 变了（router 已触发），等 DOM 渲染
-      if (location.href !== startUrl) {
-        const dom = loadCurrentPageDetailFromDom();
-        if (dom) { clearInterval(timer); resolve(dom); return; }
-      }
-
-      if (Date.now() - start >= ROUTER_WAIT_MS) {
-        clearInterval(timer);
-        resolve(null);
-      }
-    }, ROUTER_POLL_MS);
-  });
-}
-
-/* ─── DOM extraction (unchanged from original) ─── */
 
 export function loadCurrentPageDetailFromDom(): Detail | null {
   const noteId = extractNoteIdFromLocation();
