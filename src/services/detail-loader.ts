@@ -24,15 +24,22 @@ const COMMENT_SELECTORS = [
   '[class*="reply"]', '[class*="Reply"]',
   '[class*="interact"]', '[class*="Interact"]',
 ];
+const POLL_MS = 300;
+const POLL_TIMEOUT = 5000;
 
 export async function loadDetailInHiddenFrame(item: Card): Promise<Detail> {
-  // 查缓存：bridge 是否已从用户日常交互中捕获了此笔记的数据
   const cached = getCachedRenderedDetail(item);
   if (cached) return cached;
 
-  // 无缓存 → 立即显示卡片已有数据，不做任何程序化触发
+  // 手动触发原生卡片点击 — 指针序列模拟真实用户
+  triggerNativeClick(item);
+
+  // 等 SPA 响应 → bridge 捕获 或 DOM 出现详情
+  const result = await pollForDetail(item);
+  if (result) return result;
+
   const noteId = extractNoteId(item);
-  console.log('[XHS Workbench Shell] no cached detail for ' + noteId + ', showing card data');
+  console.log('[XHS Workbench Shell] no detail captured for ' + noteId);
   return cardOnlyDetail(item);
 }
 
@@ -67,6 +74,59 @@ function cardOnlyDetail(item: Card): Detail {
     href: item.href, images: item.image ? [item.image] : [], comments: [],
     source: 'card-only',
   };
+}
+
+function triggerNativeClick(item: Card): void {
+  const noteId = extractNoteId(item);
+
+  // 找 .note-item（Vue 组件根）
+  const container = document.querySelector<HTMLElement>('.note-item');
+  if (!container) { console.warn('[XHS Workbench Shell] no .note-item'); return; }
+
+  // 临时解除 pointer-events
+  const r = document.documentElement;
+  const prev = r.getAttribute('data-xhs-wb4-native-visible');
+  r.setAttribute('data-xhs-wb4-native-visible', 'on');
+
+  container.scrollIntoView({ block: 'center', inline: 'nearest' });
+
+  requestAnimationFrame(() => {
+    try {
+      const rect = container.getBoundingClientRect();
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+
+      [
+        new PointerEvent('pointerdown', { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, pointerType: 'mouse', isPrimary: true }),
+        new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy }),
+        new PointerEvent('pointerup', { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, pointerType: 'mouse', isPrimary: true }),
+        new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy }),
+        new MouseEvent('click', { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, button: 0, buttons: 1 }),
+      ].forEach((e) => container.dispatchEvent(e));
+
+      console.log('[XHS Workbench Shell] click dispatched on .note-item for ' + noteId, 'at', cx, cy);
+    } finally {
+      setTimeout(() => {
+        if (prev !== null) r.setAttribute('data-xhs-wb4-native-visible', prev);
+        else r.removeAttribute('data-xhs-wb4-native-visible');
+      }, 500);
+    }
+  });
+}
+
+function pollForDetail(item: Card): Promise<Detail | null> {
+  const start = Date.now();
+  return new Promise((resolve) => {
+    const t = window.setInterval(() => {
+      const cached = getCachedRenderedDetail(item);
+      if (cached) { clearInterval(t); resolve(cached); return; }
+      if (location.href !== 'https://www.xiaohongshu.com/explore') {
+        const dom = loadCurrentPageDetailFromDom();
+        if (dom) { clearInterval(t); resolve(dom); return; }
+      }
+      if (Date.now() - start >= POLL_TIMEOUT) { clearInterval(t); resolve(null); }
+    }, POLL_MS);
+  });
 }
 
 export function loadCurrentPageDetailFromDom(): Detail | null {
