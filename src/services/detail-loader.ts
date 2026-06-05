@@ -96,7 +96,6 @@ function openPopupDetail(item: Card): void {
   const href = item.href || '';
   const fullUrl = href.startsWith('http') ? href : location.origin + href;
 
-  // 去掉 xsec_token
   let cleanUrl = fullUrl;
   try {
     const u = new URL(fullUrl);
@@ -105,16 +104,14 @@ function openPopupDetail(item: Card): void {
     cleanUrl = u.href;
   } catch { /* ignore */ }
 
-  const w = 800, h = 700;
-  const left = Math.max(0, screen.width - w - 30);
-  const top = Math.max(0, screen.height - h - 30);
+  console.log('[XHS Workbench Shell] opening background window: ' + cleanUrl.slice(0, 80));
 
-  console.log('[XHS Workbench Shell] opening popup: ' + cleanUrl.slice(0, 80));
-  const popup = window.open(cleanUrl, '_blank',
-    'width=' + w + ',height=' + h + ',left=' + left + ',top=' + top);
-
-  // 6 秒后自动关闭
+  // 最小化窗口，放在左上角，立即藏到主窗口后面
+  const popup = window.open(cleanUrl, '_blank', 'width=200,height=200,top=0,left=0');
   if (popup) {
+    popup.blur();
+    window.focus();
+    // 数据回到主窗口后自动关闭（最长 6s）
     setTimeout(() => { try { popup.close(); } catch {} }, 6000);
   }
 }
