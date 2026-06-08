@@ -24,19 +24,18 @@ const COMMENT_SELECTORS = [
   '[class*="reply"]', '[class*="Reply"]',
   '[class*="interact"]', '[class*="Interact"]',
 ];
+const POLL_MS = 300;
+const POLL_TIMEOUT = 5000;
 
-/**
- * 加载详情数据。
- * 壳层不主动触发任何程序化操作（点击/跳转/弹窗），只消费已捕获的数据。
- * - 缓存命中 → 直接返回
- * - 无缓存 → 返回卡片现有数据（bridge 稍后捕获到数据会自动触发重渲染）
- */
 export async function loadDetailInHiddenFrame(item: Card): Promise<Detail> {
   const cached = getCachedRenderedDetail(item);
   if (cached) return cached;
 
-  const noteId = extractNoteId(item);
-  console.log('[XHS Workbench Shell] no cached detail for ' + noteId);
+  triggerNativeClick(item);
+  const result = await pollForDetail(item);
+  if (result) return result;
+
+  console.log('[XHS Workbench Shell] no detail captured for ' + extractNoteId(item));
   return cardOnlyDetail(item);
 }
 
@@ -71,6 +70,67 @@ function cardOnlyDetail(item: Card): Detail {
     href: item.href, images: item.image ? [item.image] : [], comments: [],
     source: 'card-only',
   };
+}
+
+/**
+ * isTrusted monkey-patch + 完整指针序列派发。
+ * page-hook 提供了 trustOn/trustOff 全局函数在主世界里覆盖 isTrusted。
+ */
+function triggerNativeClick(item: Card): void {
+  const noteId = extractNoteId(item);
+  const container = document.querySelector<HTMLElement>('.note-item');
+  if (!container) { console.warn('[XHS Workbench Shell] no .note-item'); return; }
+
+  // 临时解除 pointer-events
+  const r = document.documentElement;
+  const prev = r.getAttribute('data-xhs-wb4-native-visible');
+  r.setAttribute('data-xhs-wb4-native-visible', 'on');
+
+  container.scrollIntoView({ block: 'center', inline: 'nearest' });
+
+  requestAnimationFrame(() => {
+    try {
+      const rect = container.getBoundingClientRect();
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+
+      // monkey-patch isTrusted → true
+      (window as unknown as Record<string, () => void>).__xhs_wb5_trustOn?.();
+
+      [
+        new PointerEvent('pointerdown', { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, pointerType: 'mouse', isPrimary: true }),
+        new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy }),
+        new PointerEvent('pointerup', { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, pointerType: 'mouse', isPrimary: true }),
+        new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy }),
+        new MouseEvent('click', { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, button: 0, buttons: 1 }),
+      ].forEach((e) => container.dispatchEvent(e));
+
+      // 恢复
+      (window as unknown as Record<string, () => void>).__xhs_wb5_trustOff?.();
+
+      console.log('[XHS Workbench Shell] click + trustPatch dispatched for ' + noteId);
+    } finally {
+      setTimeout(() => {
+        if (prev !== null) r.setAttribute('data-xhs-wb4-native-visible', prev);
+        else r.removeAttribute('data-xhs-wb4-native-visible');
+      }, 500);
+    }
+  });
+}
+
+function pollForDetail(item: Card): Promise<Detail | null> {
+  const start = Date.now();
+  return new Promise((resolve) => {
+    const t = window.setInterval(() => {
+      const cached = getCachedRenderedDetail(item);
+      if (cached) { clearInterval(t); resolve(cached); return; }
+      if (location.href !== 'https://www.xiaohongshu.com/explore') {
+        const dom = loadCurrentPageDetailFromDom();
+        if (dom) { clearInterval(t); resolve(dom); return; }
+      }
+      if (Date.now() - start >= POLL_TIMEOUT) { clearInterval(t); resolve(null); }
+    }, POLL_MS);
+  });
 }
 
 export function loadCurrentPageDetailFromDom(): Detail | null {

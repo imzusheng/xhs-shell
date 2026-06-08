@@ -198,6 +198,28 @@ export function getPageHookCode(): string {
 
   console.log('[XHS WB5 Hook] installed at document-start');
 
+  // ─── isTrusted monkey-patch: 让合成事件通过 XHS 的 isTrusted 检查 ───
+  var _trustSaved = null;
+  window.__xhs_wb5_trustOn = function() {
+    if (_trustSaved) return;
+    try {
+      _trustSaved = Object.getOwnPropertyDescriptor(Event.prototype, 'isTrusted');
+      if (_trustSaved && _trustSaved.configurable) {
+        Object.defineProperty(Event.prototype, 'isTrusted', {
+          get: function() { return true; },
+          configurable: true
+        });
+      }
+    } catch(e) {}
+  };
+  window.__xhs_wb5_trustOff = function() {
+    if (!_trustSaved) return;
+    try {
+      Object.defineProperty(Event.prototype, 'isTrusted', _trustSaved);
+      _trustSaved = null;
+    } catch(e) {}
+  };
+
   // immediate test: verify postMessage bridge works
   try {
     window.postMessage({ __xhs_wb5_bridge: true, type: 'api-response', url: 'TEST_PING', method: 'TEST', status: 0, body: { _test: true }, ts: Date.now() }, '*');

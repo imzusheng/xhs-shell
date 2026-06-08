@@ -1,4 +1,4 @@
-export const VERSION = '5.0.2';
+export const VERSION = '5.0.3';
 export const AUTHOR = 'imzusheng@163.com';
 export const KEY = '__xhs_workbench_shell_v5__';
 
